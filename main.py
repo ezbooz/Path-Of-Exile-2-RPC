@@ -243,12 +243,21 @@ def rpc_connect():
     return None
 
 
-def update_rpc(level_info, instance_info=None, status=None):
+def update_rpc(
+    level_info,
+    instance_info=None,
+    status=None,
+    small_image_override=None,
+    afk_suffix=False,
+):
     if instance_info:
         status = f"In: {instance_info['location_name']} (Lvl {instance_info['location_level']})"
     else:
         if status is None:
             status = random_status()
+
+    if afk_suffix:
+        status = f"{status} [AFK]"
 
     try:
         details = (
@@ -260,11 +269,15 @@ def update_rpc(level_info, instance_info=None, status=None):
             )
             + f" - Lvl {level_info['level']})"
         )
+        if small_image_override is not None:
+            small_image = small_image_override
+        else:
+            small_image = level_info["ascension_class"].lower().replace(" ", "_")
         rpc.update(
             details=details,
             state=status,
             start=int(datetime.datetime.now().timestamp()),
-            small_image=level_info["ascension_class"].lower().replace(" ", "_"),
+            small_image=small_image,
         )
     except Exception as e:
         logging.error(f"Failed to update RPC: {e}")
@@ -272,6 +285,10 @@ def update_rpc(level_info, instance_info=None, status=None):
 
 regex_level = re.compile(r": (\w+) \(([\w\s]+)\) is now level (\d+)")
 regex_instance = re.compile(r'Generating level (\d+) area "([^"]+)" with seed (\d+)')
+regex_afk = re.compile(r': (DND|AFK) mode is now (?:(ON)\. Autoreply "(.*)"|(OFF))')
+
+_afk_on = False
+_prior_small_image: Optional[str] = None
 
 
 def monitor_log():
@@ -298,6 +315,8 @@ def monitor_log():
             small_image=last_level_info["ascension_class"].lower(),
         )
 
+    global _afk_on, _prior_small_image
+
     with log_file_path.open("r", encoding="utf-8") as log_file:
         log_file.seek(0, 2)
 
@@ -321,6 +340,33 @@ def monitor_log():
                 ):
                     current_status["instance_info"] = instance_info
                     update_rpc(current_status["level_info"], instance_info)
+
+                afk_match = regex_afk.search(line)
+                if afk_match and current_status["level_info"]:
+                    on_token = afk_match.group(2)
+                    if on_token == "ON":
+                        # Snapshot current small_image so OFF restores EXACTLY
+                        # this value, even if level changes during AFK window.
+                        _prior_small_image = (
+                            current_status["level_info"]["ascension_class"]
+                            .lower()
+                            .replace(" ", "_")
+                        )
+                        _afk_on = True
+                        update_rpc(
+                            current_status["level_info"],
+                            current_status["instance_info"],
+                            small_image_override="afk",
+                            afk_suffix=True,
+                        )
+                    else:
+                        _afk_on = False
+                        update_rpc(
+                            current_status["level_info"],
+                            current_status["instance_info"],
+                            small_image_override=_prior_small_image,
+                        )
+                        _prior_small_image = None
 
             time.sleep(5)
 
