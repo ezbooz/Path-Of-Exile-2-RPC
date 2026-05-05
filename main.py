@@ -272,9 +272,22 @@ def update_rpc(level_info, instance_info=None, status=None):
 
 regex_level = re.compile(r": (\w+) \(([\w\s]+)\) is now level (\d+)")
 regex_instance = re.compile(r'Generating level (\d+) area "([^"]+)" with seed (\d+)')
+regex_local_area_entered = re.compile(r": You have entered (.*)\.")
+regex_party_joined = re.compile(r": (\S+) has joined the area\.")
+
+# Owner-detection state machine: filters level events from party members.
+#   UNKNOWN       : no area-entry seen yet -> emit freely
+#   AREA_ENTERED  : ": You have entered ..." just fired, no party member yet -> next level pins
+#   PINNED        : owner identified, only that name's level events update presence
+#   INVALIDATED   : a party member joined inside an unpinned window -> drop until next area entry
+# Override via POE2_CHARACTER_NAME=<ign> short-circuits to PINNED on first area entry.
+_owner_state = "UNKNOWN"
+_pinned_name: Optional[str] = None
+_override_name: Optional[str] = os.environ.get("POE2_CHARACTER_NAME")
 
 
 def monitor_log():
+    global _owner_state, _pinned_name
     game_path = find_game_log()
 
     log_file_path = Path(game_path)
@@ -306,7 +319,32 @@ def monitor_log():
         while True:
             new_lines = log_file.readlines()
             for line in new_lines:
+                if regex_local_area_entered.search(line):
+                    if _override_name is not None:
+                        _owner_state = "PINNED"
+                        _pinned_name = _override_name
+                    else:
+                        _owner_state = "AREA_ENTERED"
+                        _pinned_name = None
+                    continue
+                if party_match := regex_party_joined.search(line):
+                    if _owner_state == "AREA_ENTERED":
+                        _owner_state = "INVALIDATED"
+                    elif _owner_state == "PINNED":
+                        logging.warning(
+                            f"Party member {party_match.group(1)} joined while pinned to {_pinned_name}; keeping pin"
+                        )
+                    continue
+
                 level_info = find_last_level_up(line, regex_level)
+                if level_info:
+                    if _owner_state == "PINNED" and level_info["username"] != _pinned_name:
+                        continue
+                    if _owner_state == "INVALIDATED":
+                        continue
+                    if _owner_state == "AREA_ENTERED":
+                        _owner_state = "PINNED"
+                        _pinned_name = level_info["username"]
                 if level_info and (
                     not current_status["level_info"]
                     or level_info != current_status["level_info"]
