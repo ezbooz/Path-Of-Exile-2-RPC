@@ -100,12 +100,15 @@ class ClassAscendency(Enum):
         }[self]
 
 
+PROCESS_CANDIDATES = ["PathOfExileSteam.exe", "PathOfExile.exe"]
+
+
 def find_game_log():
     logging.info("Waiting for the game start..")
     while True:
         try:
             for process in psutil.process_iter(["name", "exe"]):
-                if process.info.get("name") == "PathOfExileSteam.exe":
+                if process.info.get("name") in PROCESS_CANDIDATES:
                     full_path = process.info.get("exe")
                     if full_path:
                         game_dir = os.path.dirname(full_path)
