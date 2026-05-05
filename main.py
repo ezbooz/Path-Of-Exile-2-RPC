@@ -1,8 +1,11 @@
+import argparse
 import datetime
 import json
 import logging
 import os
 import re
+import sys
+import threading
 import time
 from enum import Enum
 from pathlib import Path
@@ -11,6 +14,8 @@ from typing import Dict, List, Optional
 
 import psutil
 from pypresence import Presence
+
+_stop_event = threading.Event()
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -303,7 +308,7 @@ def monitor_log():
 
         current_status = {"level_info": last_level_info, "instance_info": None}
 
-        while True:
+        while not _stop_event.is_set():
             new_lines = log_file.readlines()
             for line in new_lines:
                 level_info = find_last_level_up(line, regex_level)
@@ -322,9 +327,179 @@ def monitor_log():
                     current_status["instance_info"] = instance_info
                     update_rpc(current_status["level_info"], instance_info)
 
-            time.sleep(5)
+            if _stop_event.wait(5.0):
+                break
+
+
+# ---------------------------------------------------------------------------
+# Background launcher: tray icon + Windows Startup-folder shortcut.
+# All optional dependencies (pystray, Pillow, pylnk3) are imported lazily
+# inside the helpers below so the standard `python main.py` flow keeps
+# working without them. Install them with: pip install pystray Pillow pylnk3
+# ---------------------------------------------------------------------------
+
+_STARTUP_SHORTCUT_NAME = "PathOfExile2DiscordRPC.lnk"
+
+
+def _startup_dir() -> Path:
+    appdata = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+    return appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+
+
+def _resolve_target_exe() -> Path:
+    """Return the executable the Startup shortcut should launch.
+
+    Frozen (PyInstaller --onefile) installs point at the bundled .exe;
+    source installs point at the current Python interpreter.
+    """
+    return Path(sys.executable)
+
+
+def _resolve_target_args() -> List[str]:
+    """Args the shortcut passes; for source installs, prepend the script path."""
+    if getattr(sys, "frozen", False):
+        return ["--tray", "--quiet"]
+    return [str(Path(__file__).resolve()), "--tray", "--quiet"]
+
+
+def install_autostart() -> Path:
+    try:
+        import pylnk3
+    except ImportError:
+        sys.exit(
+            "Autostart support requires pylnk3. Install with: pip install pylnk3"
+        )
+
+    target = _startup_dir() / _STARTUP_SHORTCUT_NAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pylnk3.for_file(
+        target_file=str(_resolve_target_exe()),
+        lnk_name=str(target),
+        arguments=" ".join(_resolve_target_args()),
+        description="Path of Exile 2 Discord RPC (background tray)",
+    )
+    logging.info(f"Installed Startup shortcut at {target}")
+    return target
+
+
+def uninstall_autostart() -> bool:
+    target = _startup_dir() / _STARTUP_SHORTCUT_NAME
+    if target.exists():
+        target.unlink()
+        logging.info(f"Removed Startup shortcut at {target}")
+        return True
+    logging.info(f"No Startup shortcut found at {target}")
+    return False
+
+
+def _open_log_file() -> None:
+    """Best-effort open of the live game log via the OS handler."""
+    try:
+        path = Path(find_game_log())
+    except Exception as e:
+        logging.error(f"Cannot resolve log path: {e}")
+        return
+    if sys.platform.startswith("win"):
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        os.system(f'open "{path}"')
+    else:
+        os.system(f'xdg-open "{path}"')
+
+
+def _restart_self() -> None:
+    """Re-exec the current process with the same arguments."""
+    _stop_event.set()
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+def run_tray() -> None:
+    try:
+        import pystray
+        from PIL import Image
+    except ImportError:
+        sys.exit(
+            "Tray support requires pystray and Pillow. "
+            "Install with: pip install pystray Pillow"
+        )
+
+    icon_image = Image.new("RGB", (64, 64), (40, 16, 56))
+    state: Dict[str, str] = {"status": "waiting"}
+
+    def on_quit(icon: object, _item: object) -> None:
+        _stop_event.set()
+        getattr(icon, "stop", lambda: None)()
+
+    def on_open_log(_icon: object, _item: object) -> None:
+        _open_log_file()
+
+    def on_restart(_icon: object, _item: object) -> None:
+        _restart_self()
+
+    menu = pystray.Menu(
+        pystray.MenuItem(lambda _i: f"Status: {state['status']}", None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Open log file", on_open_log),
+        pystray.MenuItem("Restart", on_restart),
+        pystray.MenuItem("Quit", on_quit),
+    )
+    icon = pystray.Icon("poe2-rpc", icon_image, "PoE2 RPC", menu=menu)
+
+    def worker() -> None:
+        global rpc
+        try:
+            rpc = rpc_connect()
+            state["status"] = "running"
+            icon.update_menu()
+            monitor_log()
+        except Exception as e:
+            state["status"] = "error"
+            logging.error(f"Tray worker crashed: {e}")
+            icon.update_menu()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    icon.run()
+    _stop_event.set()
+    thread.join(timeout=5.0)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Path of Exile 2 Discord RPC")
+    parser.add_argument(
+        "--tray",
+        action="store_true",
+        help="Run as a system-tray background service (requires pystray + Pillow).",
+    )
+    parser.add_argument(
+        "--install-autostart",
+        action="store_true",
+        help="Install a Windows Startup-folder shortcut that launches --tray on login.",
+    )
+    parser.add_argument(
+        "--uninstall-autostart",
+        action="store_true",
+        help="Remove the Windows Startup-folder shortcut, if present.",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress console logging (intended for tray/autostart launches).",
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
+    args = _parse_args()
+    if args.quiet:
+        logging.getLogger().setLevel(logging.WARNING)
+    if args.install_autostart:
+        install_autostart()
+        sys.exit(0)
+    if args.uninstall_autostart:
+        sys.exit(0 if uninstall_autostart() else 1)
+    if args.tray:
+        run_tray()
+        sys.exit(0)
     rpc = rpc_connect()
     monitor_log()

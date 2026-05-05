@@ -1,2 +1,6 @@
 psutil
 pypresence
+
+# Optional: background tray + Windows autostart shortcut.
+# Install when you want `python main.py --tray` or `--install-autostart`:
+#   pip install pystray Pillow pylnk3
