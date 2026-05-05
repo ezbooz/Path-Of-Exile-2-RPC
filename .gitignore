@@ -1,2 +1,28 @@
 .idea/
 __pycache__/
+.DS_Store
+
+# Build artifacts (PyInstaller + setuptools)
+dist/
+build/
+*.egg-info/
+*.spec.bak
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Local Claude Code config
+.claude/
+
+# OMC runtime artifacts (specs/plans are tracked separately)
+.omc/sessions/
+.omc/state/
+.omc/project-memory.json
+.omc/notepad.md

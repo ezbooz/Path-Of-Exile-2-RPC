@@ -1,0 +1,8 @@
+# Open Questions
+
+## ralplan-architecture-libraries — 2026-05-04
+
+- [ ] **`LevelInfo.ascension_class` type — `str | None` vs `"Unknown"` literal?** — Plan assumes `None` for type-safety; presence-handler omits the `| {ascension}` segment when None. Current `main.py` uses the literal string `"Unknown"`. Confirm before closing task **B-2**. Matters because every downstream handler needs a single typed shape; mixing the two creates a runtime `if x == "Unknown"` smell.
+- [ ] **Bundled `locations.json` location in source tree — `src/poe2_rpc/locations.json` or root-level + `[tool.setuptools.package-data]` mapping?** — Plan assumes the latter (single source of truth at repo root, mapped into the package via package-data). Confirm before closing task **F-2**. Matters because `importlib.resources.files("poe2_rpc")` resolution must work both in dev-install (`pip install -e .`) and inside the PyInstaller `.exe` bundle, and the wrong choice causes one of the two environments to silently miss the file.
+- [ ] **`--debug-watchdog` CLI flag — keep in v1 or defer?** — Plan assumes keep, as PM-1 triage aid (prints every `FileSystemEvent`). Cost is small at task **E-1**. Confirm before closing E-1. Matters because if watchdog stalls in the wild (PM-1), users have no other lever to produce a useful issue report.
+- [ ] **Live-game smoke run owner and timing for task G-4** — Who runs the .exe against a real PoE2 client + Discord, and at what point in the cutover (before or after `main.py` deletion in G-2)? Plan assumes G-4 follows G-3, but a pre-deletion smoke run would let us roll back without resurrecting `main.py` from git. Matters for de-risking cutover.
